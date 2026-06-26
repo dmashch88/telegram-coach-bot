@@ -40,6 +40,13 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                timezone TEXT,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """)
 
 def get_user(telegram_id: int) -> Optional[dict]:
     with get_connection() as conn:
@@ -112,3 +119,36 @@ def get_stats(telegram_id: int) -> dict:
             (user['id'],)
         ).fetchone()[0]
         return {"morning": morning_count, "evening": evening_count}
+
+def set_user_timezone(telegram_id: int, timezone_str: str):
+    user = get_user(telegram_id)
+    if not user:
+        return
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (user_id, timezone) VALUES (?, ?)",
+            (user['id'], timezone_str)
+        )
+        conn.commit()
+
+def get_user_timezone(telegram_id: int) -> Optional[str]:
+    user = get_user(telegram_id)
+    if not user:
+        return None
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT timezone FROM user_settings WHERE user_id = ?", (user['id'],)
+        ).fetchone()
+        return row['timezone'] if row else None
+
+def reset_user(telegram_id: int):
+    """Удаляет всю историю и настройки пользователя, оставляя только учётную запись."""
+    user = get_user(telegram_id)
+    if not user:
+        return
+    with get_connection() as conn:
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user['id'],))
+        conn.execute("DELETE FROM daily_status WHERE user_id = ?", (user['id'],))
+        conn.execute("DELETE FROM user_settings WHERE user_id = ?", (user['id'],))
+        conn.execute("UPDATE users SET goal_text = NULL, goal_deadline = NULL WHERE id = ?", (user['id'],))
+        conn.commit()

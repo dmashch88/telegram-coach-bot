@@ -5,8 +5,10 @@ from aiogram.types import Message
 import json
 import random
 
-from database import get_user, save_session
+from database import get_user, save_session, get_user_timezone
 from llm_client import generate_response
+from utils import is_within_window
+from config import TIMEZONE as DEFAULT_TZ
 
 router = Router()
 
@@ -41,6 +43,28 @@ async def process_evening_response(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    # Часовой пояс
+    tz = get_user_timezone(message.from_user.id) or DEFAULT_TZ
+
+    # Проверка вечернего окна
+    if not is_within_window(tz, "evening"):
+        r = random.random()
+        if r < PHRASES["off_window"]["ignore_chance"]:
+            pass
+        elif r < 0.7:
+            await message.answer(PHRASES["off_window"]["dry_response"])
+        else:
+            # Цитату берём из morning (можно создать отдельный список)
+            from handlers.morning import QUOTES as MORNING_QUOTES
+            quote = random.choice(MORNING_QUOTES)
+            await message.answer(
+                PHRASES["off_window"]["with_quote"].replace("{quote}", quote),
+                parse_mode="Markdown"
+            )
+        await state.clear()
+        return
+
+    # Обычная обработка
     user_input = message.text
     goal = user['goal_text']
 

@@ -6,8 +6,10 @@ import json
 import random
 from datetime import datetime
 
-from database import get_user, save_session
+from database import get_user, save_session, get_user_timezone
 from llm_client import generate_response
+from utils import is_within_window
+from config import TIMEZONE as DEFAULT_TZ
 
 router = Router()
 
@@ -28,7 +30,6 @@ QUOTES = load_quotes()
 async def send_morning_message(bot, telegram_id: int, goal_text: str):
     """Отправляет утреннее сообщение пользователю"""
     greeting = random.choice(PHRASES["greetings"]["morning"])
-    # Безопасная подстановка цели
     reminder_template = random.choice(PHRASES["goal_reminder"])
     reminder = reminder_template.replace("{goal}", goal_text)
     quote = random.choice(QUOTES)
@@ -50,6 +51,27 @@ async def process_morning_response(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    # Определяем часовой пояс пользователя
+    tz = get_user_timezone(message.from_user.id) or DEFAULT_TZ
+
+    # Проверяем, попадает ли время в утреннее окно
+    if not is_within_window(tz, "morning"):
+        r = random.random()
+        if r < PHRASES["off_window"]["ignore_chance"]:
+            # Игнорируем (не отвечаем)
+            pass
+        elif r < 0.7:
+            await message.answer(PHRASES["off_window"]["dry_response"])
+        else:
+            quote = random.choice(QUOTES)
+            await message.answer(
+                PHRASES["off_window"]["with_quote"].replace("{quote}", quote),
+                parse_mode="Markdown"
+            )
+        await state.clear()
+        return
+
+    # Стандартная обработка утреннего ответа
     goal = user['goal_text']
     user_input = message.text
 

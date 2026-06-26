@@ -2,12 +2,11 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from contextlib import asynccontextmanager
 
 from config import BOT_TOKEN
 from database import init_db
 from scheduler import setup_scheduler, scheduler
-from handlers import start, morning, evening, common
+from handlers import start, morning, evening, common, off_window
 
 logging.basicConfig(level=logging.INFO)
 
@@ -16,13 +15,12 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Подключаем роутеры
     dp.include_router(start.router)
     dp.include_router(morning.router)
     dp.include_router(evening.router)
     dp.include_router(common.router)
+    dp.include_router(off_window.router)   # должен быть последним
 
-    # Настраиваем планировщик
     setup_scheduler(bot)
 
     try:
