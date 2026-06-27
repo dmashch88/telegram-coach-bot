@@ -1,0 +1,63 @@
+from aiogram import Router, F
+from aiogram.types import Message
+from database import get_user, get_streak, get_goal_match_count, get_total_sessions, get_session_count
+
+router = Router()
+
+async def check_anniversary(message: Message, user_id: int):
+    """Проверяет, нужно ли отправить юбилейное сообщение."""
+    user = get_user_by_id(user_id)  # используем функцию из database
+    if not user:
+        return
+    streak = get_streak(user_id)
+    total_sessions = get_total_sessions(user_id)
+    matches = get_goal_match_count(user_id)
+
+    # 8-й день
+    if streak == 8:
+        await message.answer(
+            "🎉 *Поздравляю! Ты уже 8 дней идёшь к своей цели!*\n\n"
+            "Это огромный шаг вперёд. Ты показал, что умеешь быть дисциплинированным. "
+            "Продолжай в том же духе! 💪",
+            parse_mode="Markdown"
+        )
+    # 21-й день
+    elif streak == 21:
+        await message.answer(
+            "🔥 *21 день! Ты создал привычку!*\n\n"
+            "Это важный рубеж. Теперь твоя цель — не просто мечта, а часть твоей жизни. "
+            "Горжусь тобой! 🏆",
+            parse_mode="Markdown"
+        )
+    # 100-е повторение цели (каждый раз, когда кратно 100)
+    elif matches >= 100 and matches % 100 == 0:
+        await message.answer(
+            "👑 *100 раз ты повторил свою цель!*\n\n"
+            "Это достойно глубочайшего уважения. Ты — пример настойчивости и веры в себя. "
+            "Так держать! 🚀",
+            parse_mode="Markdown"
+        )
+
+@router.message(F.text.lower() == "статистика")
+async def cmd_stats(message: Message):
+    user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("Ты ещё не зарегистрирован. Напиши /start.")
+        return
+
+    streak = get_streak(user['id'])
+    total_sessions = get_total_sessions(user['id'])
+    matches = get_goal_match_count(user['id'])
+    morning_count = get_session_count(user['id'], "morning")
+    evening_count = get_session_count(user['id'], "evening")
+
+    text = (
+        f"📊 *Твоя статистика*\n\n"
+        f"📅 Дней подряд: {streak}\n"
+        f"🌅 Утренних сессий: {morning_count}\n"
+        f"🌇 Вечерних сессий: {evening_count}\n"
+        f"🔄 Всего повторений цели: {total_sessions}\n"
+        f"✅ Совпадений с целью: {matches}\n\n"
+        "Продолжай в том же духе! Ты справишься! 💪"
+    )
+    await message.answer(text, parse_mode="Markdown")

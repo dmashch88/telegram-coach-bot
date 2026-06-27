@@ -1,93 +1,62 @@
-from aiogram import Router, F
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
-import json
 import random
+from aiogram import Router, F
+from aiogram.types import Message
+from aiogram.fsm.context import FSMContext
 
-from database import get_user, save_session, get_user_timezone
+from database import get_user, save_session, update_streak, save_goal_match, get_user_timezone
+from utils import get_today_str, is_within_window
 from llm_client import generate_response
-from utils import is_within_window
-from config import TIMEZONE as DEFAULT_TZ
+from handlers.stats import check_anniversary
+from data.phrases import PHRASES
+from data.quotes import QUOTES
 
 router = Router()
 
-class EveningStates(StatesGroup):
-    evening_report = State()
-
-def load_phrases():
-    with open("data/phrases.json", "r", encoding="utf-8") as f:
-        return json.load(f)
-
-PHRASES = load_phrases()
-
-async def send_evening_message(bot, telegram_id: int, goal_text: str):
-    greeting = random.choice(PHRASES["greetings"]["evening"])
-    reminder_template = random.choice(PHRASES["goal_reminder"])
-    reminder = reminder_template.replace("{goal}", goal_text)
-    text = (
-        f"🌆 {greeting}\n\n"
-        f"{reminder}\n\n"
-        f"📝 *Напиши свою цель ещё раз* для закрепления.\n"
-        f"Затем ответь на вопрос: *Какой 1 шаг ты сделал сегодня к этой цели?*\n"
-        f"Если не сделал — напиши «ПРОКРАСТИНИРОВАЛ».\n\n"
-        f"Будь честен, это твой личный дневник."
-    )
-    await bot.send_message(telegram_id, text, parse_mode="Markdown")
-
-@router.message(F.text, EveningStates.evening_report)
+@router.message(F.text, lambda m: is_within_window(get_user_timezone(m.from_user.id) or "UTC", "evening"))
 async def process_evening_response(message: Message, state: FSMContext):
     user = get_user(message.from_user.id)
-    if not user:
-        await message.answer("Ты не зарегистрирован. Напиши /start.")
-        await state.clear()
+    if not user or not user.get('goal_text'):
+        await message.answer("Пожалуйста, сначала зарегистрируй цель через /start.")
         return
 
-    # Часовой пояс
-    tz = get_user_timezone(message.from_user.id) or DEFAULT_TZ
-
-    # Проверка вечернего окна
-    if not is_within_window(tz, "evening"):
-        r = random.random()
-        if r < PHRASES["off_window"]["ignore_chance"]:
-            pass
-        elif r < 0.7:
-            await message.answer(PHRASES["off_window"]["dry_response"])
-        else:
-            # Цитату берём из morning (можно создать отдельный список)
-            from handlers.morning import QUOTES as MORNING_QUOTES
-            quote = random.choice(MORNING_QUOTES)
-            await message.answer(
-                PHRASES["off_window"]["with_quote"].replace("{quote}", quote),
-                parse_mode="Markdown"
-            )
-        await state.clear()
-        return
-
-    # Обычная обработка
-    user_input = message.text
     goal = user['goal_text']
+    user_input = message.text.strip()
+    tz = user.get('timezone') or "UTC"
+    today = get_today_str(tz)
 
-    if goal.lower() not in user_input.lower():
+    # Проверяем, содержит ли сообщение цель
+    matched = goal.lower() in user_input.lower()
+    if not matched:
         await message.answer(
-            "🧐 Я не вижу твою цель в сообщении. Напиши её ещё раз вместе с шагом."
+            "❌ Я не увидел твою цель в сообщении. Попробуй ещё раз, напиши её точно!\n\n"
+            f"Твоя цель: *{goal}*",
+            parse_mode="Markdown"
         )
         return
 
-    if "прокрастинировал" in user_input.lower():
-        bot_response = random.choice(PHRASES["scold"])
-    else:
-        bot_response = random.choice(PHRASES["praise"])
+    save_goal_match(user['id'], today, "evening", matched)
+    update_streak(user['id'], today)
 
-    system_prompt = "Ты коуч. Отреагируй на отчёт пользователя о шаге. Если шаг сделан — похвали, если нет — мягко подбодри."
+    # Генерируем ответ на отчёт о шагах
+    system_prompt = "Ты коуч. Отреагируй на отчёт пользователя о шаге к цели."
     prompt = f"Пользователь написал: {user_input}. Ответь кратко и мотивирующе."
-    llm_response = await generate_response(prompt, system_prompt)
-    if llm_response:
-        bot_response = llm_response
+    bot_response = await generate_response(prompt, system_prompt)
+    if not bot_response:
+        if "прокрастинировал" in user_input.lower():
+            bot_response = random.choice(PHRASES.get("scold", ["Не сдавайся! Завтра новый день."]))
+        else:
+            bot_response = random.choice(PHRASES.get("praise", ["Отлично! Ты сделал шаг вперёд!"]))
 
     await message.answer(
         f"{bot_response}\n\n"
-        f"💪 Отличная работа над собой! Спокойной ночи, завтра новый день."
+        "🌙 Отличная работа над собой! Спокойной ночи, завтра новый день.",
+        parse_mode="Markdown"
     )
+
     save_session(user['id'], "evening", user_input, bot_response)
     await state.clear()
+
+    await check_anniversary(message, user['id'])
+
+async def send_evening_message(bot, telegram_id, goal_text):
+    pass

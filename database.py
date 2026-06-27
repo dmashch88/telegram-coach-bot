@@ -1,79 +1,136 @@
 import sqlite3
-import datetime
-from typing import Optional, List, Dict
+from datetime import datetime, timedelta
+import pytz
+from contextlib import contextmanager
 
-DB_PATH = "coach.db"
+DB_PATH = "coach_bot.db"
 
+@contextmanager
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 def init_db():
     with get_connection() as conn:
+        # Пользователи
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER UNIQUE,
                 username TEXT,
                 goal_text TEXT,
-                goal_deadline TEXT,
-                registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                timezone TEXT DEFAULT 'UTC',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Сессии (утро/вечер)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
-                session_type TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                session_type TEXT CHECK(session_type IN ('morning','evening')),
                 user_input TEXT,
                 bot_response TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
         """)
+        # Streak (серия дней)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS daily_status (
+            CREATE TABLE IF NOT EXISTS streak (
                 user_id INTEGER PRIMARY KEY,
-                last_morning DATE,
-                last_evening DATE,
+                current_streak INTEGER DEFAULT 0,
+                last_activity_date DATE,
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
         """)
+        # Совпадения цели по дням
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_settings (
-                user_id INTEGER PRIMARY KEY,
-                timezone TEXT,
+            CREATE TABLE IF NOT EXISTS goal_matches (
+                user_id INTEGER,
+                date DATE,
+                morning_match BOOLEAN DEFAULT 0,
+                evening_match BOOLEAN DEFAULT 0,
+                PRIMARY KEY (user_id, date),
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
         """)
+        conn.commit()
 
-def get_user(telegram_id: int) -> Optional[dict]:
+# ---- Пользователи ----
+def create_user(telegram_id, username=None):
     with get_connection() as conn:
-        row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
-        return dict(row) if row else None
-
-def create_user(telegram_id: int, username: str = None) -> int:
-    with get_connection() as conn:
-        user = conn.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
-        if user:
-            return user['id']
-        cursor = conn.execute(
-            "INSERT INTO users (telegram_id, username) VALUES (?, ?)",
+        conn.execute(
+            "INSERT OR IGNORE INTO users (telegram_id, username) VALUES (?, ?)",
             (telegram_id, username)
         )
         conn.commit()
-        return cursor.lastrowid
 
-def update_goal(telegram_id: int, goal: str, deadline: str = None):
+def get_user(telegram_id):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE telegram_id = ?",
+            (telegram_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+def get_user_by_id(user_id):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+def update_goal(telegram_id, goal_text):
     with get_connection() as conn:
         conn.execute(
-            "UPDATE users SET goal_text = ?, goal_deadline = ? WHERE telegram_id = ?",
-            (goal, deadline, telegram_id)
+            "UPDATE users SET goal_text = ? WHERE telegram_id = ?",
+            (goal_text, telegram_id)
         )
         conn.commit()
 
-def save_session(user_id: int, session_type: str, user_input: str, bot_response: str):
+def set_user_timezone(telegram_id, tz_str):
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE users SET timezone = ? WHERE telegram_id = ?",
+            (tz_str, telegram_id)
+        )
+        conn.commit()
+
+def get_user_timezone(telegram_id):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT timezone FROM users WHERE telegram_id = ?",
+            (telegram_id,)
+        ).fetchone()
+        return row['timezone'] if row else None
+
+def get_all_users_with_goal():
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, telegram_id, goal_text, timezone FROM users WHERE goal_text IS NOT NULL"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+def delete_user_data(telegram_id):
+    with get_connection() as conn:
+        user = get_user(telegram_id)
+        if not user:
+            return
+        user_id = user['id']
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM streak WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM goal_matches WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
+        conn.commit()
+
+# ---- Сессии ----
+def save_session(user_id, session_type, user_input, bot_response):
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO sessions (user_id, session_type, user_input, bot_response) VALUES (?, ?, ?, ?)",
@@ -81,74 +138,75 @@ def save_session(user_id: int, session_type: str, user_input: str, bot_response:
         )
         conn.commit()
 
-def get_all_users_with_goal() -> List[dict]:
+def get_session_count(user_id, session_type):
     with get_connection() as conn:
-        rows = conn.execute("SELECT * FROM users WHERE goal_text IS NOT NULL").fetchall()
-        return [dict(row) for row in rows]
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM sessions WHERE user_id = ? AND session_type = ?",
+            (user_id, session_type)
+        ).fetchone()
+        return row['cnt'] if row else 0
 
-def update_daily_status(user_id: int, session_type: str, date: str):
+def get_total_sessions(user_id):
     with get_connection() as conn:
-        if session_type == "morning":
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM sessions WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+        return row['cnt'] if row else 0
+
+# ---- Streak ----
+def update_streak(user_id, date_str):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT current_streak, last_activity_date FROM streak WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+        if row:
+            last_date = row['last_activity_date']
+            if last_date == date_str:
+                return  # уже обновлено сегодня
+            elif last_date == str((datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)).date()):
+                new_streak = row['current_streak'] + 1
+            else:
+                new_streak = 1
             conn.execute(
-                "INSERT OR REPLACE INTO daily_status (user_id, last_morning) VALUES (?, ?)",
-                (user_id, date)
+                "UPDATE streak SET current_streak = ?, last_activity_date = ? WHERE user_id = ?",
+                (new_streak, date_str, user_id)
             )
         else:
             conn.execute(
-                "INSERT OR REPLACE INTO daily_status (user_id, last_evening) VALUES (?, ?)",
-                (user_id, date)
+                "INSERT INTO streak (user_id, current_streak, last_activity_date) VALUES (?, 1, ?)",
+                (user_id, date_str)
             )
         conn.commit()
 
-def get_daily_status(user_id: int) -> dict:
-    with get_connection() as conn:
-        row = conn.execute("SELECT * FROM daily_status WHERE user_id = ?", (user_id,)).fetchone()
-        return dict(row) if row else {}
-
-def get_stats(telegram_id: int) -> dict:
-    user = get_user(telegram_id)
-    if not user:
-        return {}
-    with get_connection() as conn:
-        morning_count = conn.execute(
-            "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND session_type = 'morning'",
-            (user['id'],)
-        ).fetchone()[0]
-        evening_count = conn.execute(
-            "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND session_type = 'evening'",
-            (user['id'],)
-        ).fetchone()[0]
-        return {"morning": morning_count, "evening": evening_count}
-
-def set_user_timezone(telegram_id: int, timezone_str: str):
-    user = get_user(telegram_id)
-    if not user:
-        return
-    with get_connection() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO user_settings (user_id, timezone) VALUES (?, ?)",
-            (user['id'], timezone_str)
-        )
-        conn.commit()
-
-def get_user_timezone(telegram_id: int) -> Optional[str]:
-    user = get_user(telegram_id)
-    if not user:
-        return None
+def get_streak(user_id):
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT timezone FROM user_settings WHERE user_id = ?", (user['id'],)
+            "SELECT current_streak FROM streak WHERE user_id = ?",
+            (user_id,)
         ).fetchone()
-        return row['timezone'] if row else None
+        return row['current_streak'] if row else 0
 
-def reset_user(telegram_id: int):
-    """Удаляет всю историю и настройки пользователя, оставляя только учётную запись."""
-    user = get_user(telegram_id)
-    if not user:
-        return
+# ---- Совпадения цели ----
+def save_goal_match(user_id, date_str, session_type, matched):
     with get_connection() as conn:
-        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user['id'],))
-        conn.execute("DELETE FROM daily_status WHERE user_id = ?", (user['id'],))
-        conn.execute("DELETE FROM user_settings WHERE user_id = ?", (user['id'],))
-        conn.execute("UPDATE users SET goal_text = NULL, goal_deadline = NULL WHERE id = ?", (user['id'],))
+        if session_type == "morning":
+            conn.execute(
+                "INSERT OR REPLACE INTO goal_matches (user_id, date, morning_match) VALUES (?, ?, ?)",
+                (user_id, date_str, 1 if matched else 0)
+            )
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO goal_matches (user_id, date, evening_match) VALUES (?, ?, ?)",
+                (user_id, date_str, 1 if matched else 0)
+            )
         conn.commit()
+
+def get_goal_match_count(user_id):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT SUM(morning_match) + SUM(evening_match) as total FROM goal_matches WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+        return row['total'] if row and row['total'] else 0

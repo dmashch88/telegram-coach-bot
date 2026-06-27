@@ -1,70 +1,55 @@
-from datetime import datetime, timedelta
+import re
+from datetime import datetime
 import pytz
-from typing import Optional, Tuple
+from config import MORNING_START, MORNING_END, EVENING_START, EVENING_END
 
-POPULAR_TIMEZONES = [
-    "Europe/Moscow", "Europe/Kiev", "Europe/Minsk",
-    "Asia/Almaty", "Asia/Tashkent", "Asia/Yekaterinburg",
-    "Europe/Berlin", "Europe/Paris", "Europe/London",
-    "America/New_York", "America/Chicago", "America/Los_Angeles",
-    "Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata"
-]
-
-def validate_timezone(tz_name: str) -> bool:
-    """Проверяет, существует ли такой часовой пояс."""
-    return tz_name in pytz.all_timezones
-
-def get_local_time(tz_name: str) -> Optional[datetime]:
-    """Возвращает текущее время в указанном часовом поясе."""
+def validate_timezone(tz_str: str) -> bool:
     try:
-        tz = pytz.timezone(tz_name)
-        return datetime.now(tz)
-    except Exception:
-        return None
-
-def is_within_window(tz_name: str, window_type: str) -> bool:
-    """
-    Проверяет, попадает ли текущее время в заданное окно.
-    window_type: 'morning' (06:00-09:00) или 'evening' (21:00-23:59)
-    """
-    now = get_local_time(tz_name)
-    if not now:
+        pytz.timezone(tz_str)
         return True
+    except pytz.UnknownTimeZoneError:
+        return False
+
+def get_user_timezone_str(utc_offset: str) -> str:
+    """
+    Преобразует строку вида '+3' или '-5' в часовой пояс типа 'Etc/GMT-3'.
+    """
+    match = re.match(r"^([+-])(\d{1,2})$", utc_offset.strip())
+    if not match:
+        return None
+    sign, hours = match.groups()
+    offset_hours = int(hours)
+    if sign == '-':
+        offset_hours = -offset_hours
+    # В Etc/GMT знак инвертирован: Etc/GMT-3 означает +3
+    return f"Etc/GMT{'+' if offset_hours < 0 else '-'}{abs(offset_hours)}"
+
+def get_current_time_in_tz(tz_str: str) -> datetime:
+    tz = pytz.timezone(tz_str)
+    return datetime.now(tz)
+
+def is_within_window(tz_str: str, window_type: str) -> bool:
+    now = get_current_time_in_tz(tz_str)
     hour = now.hour
     if window_type == "morning":
-        return 6 <= hour < 9
+        return MORNING_START <= hour < MORNING_END
     elif window_type == "evening":
-        return hour >= 21
+        return EVENING_START <= hour < EVENING_END
     return False
 
-def get_next_window_info(tz_name: str) -> Optional[Tuple[str, str]]:
-    """
-    Возвращает ближайшее окно ('morning' или 'evening') и строку с временем до него.
-    Если сейчас утро – вернёт вечер, и наоборот.
-    """
-    now = get_local_time(tz_name)
-    if not now:
-        return None
-    tz = pytz.timezone(tz_name)
-    current_hour = now.hour
-    if 6 <= current_hour < 9:
-        # Сейчас утро, следующее окно – вечер сегодня в 21:00
-        target = now.replace(hour=21, minute=0, second=0, microsecond=0)
-        delta = target - now
-        hours, remainder = divmod(delta.seconds, 3600)
-        minutes = remainder // 60
-        return ("evening", f"{hours} ч {minutes} мин")
-    elif current_hour >= 21:
-        # Вечер, следующее окно – завтра утро в 6:00
-        target = now.replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        delta = target - now
-        hours, remainder = divmod(delta.seconds, 3600)
-        minutes = remainder // 60
-        return ("morning", f"{hours} ч {minutes} мин")
+def get_next_window_info(tz_str: str):
+    now = get_current_time_in_tz(tz_str)
+    hour = now.hour
+    if hour < MORNING_START:
+        return "morning", MORNING_START - hour
+    elif hour < MORNING_END:
+        return "morning", 0
+    elif hour < EVENING_START:
+        return "evening", EVENING_START - hour
+    elif hour < EVENING_END:
+        return "evening", 0
     else:
-        # Днём (9-21) – ближайшее окно вечер
-        target = now.replace(hour=21, minute=0, second=0, microsecond=0)
-        delta = target - now
-        hours, remainder = divmod(delta.seconds, 3600)
-        minutes = remainder // 60
-        return ("evening", f"{hours} ч {minutes} мин")
+        return "morning", (24 - hour) + MORNING_START
+
+def get_today_str(tz_str: str) -> str:
+    return get_current_time_in_tz(tz_str).strftime("%Y-%m-%d")
